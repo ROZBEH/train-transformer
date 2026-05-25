@@ -90,7 +90,7 @@ class MultiHeadAttention(nn.Module):
             casual_mask = padding_mask = None
         else:
             updated_layer_cache = KeyValueCache(key=K, value=V)
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.dhead)  # (B, nheads, T, T)
+        attention_scores = (Q @ K.transpose(-2, -1)) / math.sqrt(self.dhead)  # (B, nheads, T, T)
         if casual_mask is not None:
             attention_scores = attention_scores + casual_mask
         if padding_mask is not None:
@@ -98,7 +98,7 @@ class MultiHeadAttention(nn.Module):
         
         attn_weights = self.softmax(attention_scores)
         attn_weights = self.dropout_attention(attn_weights)
-        output = torch.matmul(attn_weights, V)  # (B, nheads, T, dhead)
+        output = attn_weights @ V  # (B, nheads, T, dhead)
 
         # Concatenate heads
         output = output.transpose(1, 2).contiguous().view(B, T, self.dmodel)  # (B, T, dmodel) <<<<< Note that the transpose happens here before the projection layer 
@@ -146,12 +146,16 @@ class Decoder(nn.Module):
             x -> LayerNorm -> (attention or projection block) -> Add(x)
         Using pre layernorm makes deeper models more stable
         """
-        x, updated_layer_cache = self.mha(x, casual_mask, padding_mask, layer_cache)
-        x = self.dropout_mha(x) + x
-        x = self.ln1(x)
-        x = self.ff(x)
-        x = self.dropout_ff(x) + x
-        x = self.ln2(x)
+        residual = x
+        attn_out, updated_layer_cache = self.mha(
+            x, casual_mask, padding_mask, layer_cache
+        )
+        x = self.ln1(residual + self.dropout_mha(attn_out))
+
+        residual = x
+        ff_out = self.ff(x)
+        x = self.ln2(residual + self.dropout_ff(ff_out))
+
         return x, updated_layer_cache
 
 class Transformer(nn.Module):
