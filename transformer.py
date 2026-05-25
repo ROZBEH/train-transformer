@@ -67,7 +67,7 @@ class MultiHeadAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
         self.projection = nn.Linear(dmodel, dmodel)
     
-    def forward(self, x, casual_mask=None, padding_mask=None, layer_cache: Optional[KeyValueCache] = None):
+    def forward(self, x, causal_mask=None, padding_mask=None, layer_cache: Optional[KeyValueCache] = None):
         B, T, _ = x.size()
 
         kv = self.kv(x)
@@ -82,17 +82,18 @@ class MultiHeadAttention(nn.Module):
         # which leads to (B, nheads, T, T)
         # you cannot simply use Q@K.T since this is not a 2D multiplication
         # <<<<< note that for the K you have to transpose the last two dimensions
-        if layer_cache:
+        if layer_cache is not None:
+            assert T == 1, "Cached decoding assumes one token at a time"
             updated_layer_cache = layer_cache.append(new_k=K, new_v=V)
             K = updated_layer_cache.key
             V = updated_layer_cache.value
             # no need for mask since we are doing 1 token at a time
-            casual_mask = padding_mask = None
+            causal_mask = padding_mask = None
         else:
             updated_layer_cache = KeyValueCache(key=K, value=V)
         attention_scores = (Q @ K.transpose(-2, -1)) / math.sqrt(self.dhead)  # (B, nheads, T, T)
-        if casual_mask is not None:
-            attention_scores = attention_scores + casual_mask
+        if causal_mask is not None:
+            attention_scores = attention_scores + causal_mask
         if padding_mask is not None:
             attention_scores = attention_scores.masked_fill(padding_mask, float('-inf'))
         
@@ -135,7 +136,7 @@ class Decoder(nn.Module):
         self.dropout_ff = nn.Dropout(p=0.1)
         self.ln2 = nn.LayerNorm(dmodel)
 
-    def forward(self, x, casual_mask, padding_mask, layer_cache: Optional[KeyValueCache] = None):
+    def forward(self, x, causal_mask, padding_mask, layer_cache: Optional[KeyValueCache] = None):
         """
         Note that this implementation follows the original transformer implementation which
         uses layernorm after mha/residual and mlp/residual. The GPT implementation uses layernorm
@@ -148,7 +149,7 @@ class Decoder(nn.Module):
         """
         residual = x
         attn_out, updated_layer_cache = self.mha(
-            x, casual_mask, padding_mask, layer_cache
+            x, causal_mask, padding_mask, layer_cache
         )
         x = self.ln1(residual + self.dropout_mha(attn_out))
 
@@ -169,7 +170,6 @@ class Transformer(nn.Module):
         self.decoders = nn.ModuleList([Decoder(dmodel, nheads) for _ in range(nlayers)]) # <<<< Note the nn.Module list. Note you cannot make it a sequential module since you are passing multiple argumnets like x and masks
         self.ln_final = nn.LayerNorm(dmodel)
         self.linear = nn.Linear(in_features=dmodel, out_features=vocabsize)
-        self.dropout_projection = nn.Dropout(p=0.1)
 
     def forward(self, x, cache: Optional[Cache] = None):
         pos_offset = cache.length if cache else 0
@@ -191,8 +191,6 @@ class Transformer(nn.Module):
             layer_cache = None if cache is None else cache.layers[i]
             x, new_cache = self.decoders[i](x, causal_mask, padding_mask, layer_cache)
             new_cache_layers.append(new_cache)
-        # x = self.ln_final(x)
         x = self.linear(x)
-        x = self.dropout_projection(x)
         updated_cache = Cache(new_cache_layers)
         return x, updated_cache
